@@ -114,6 +114,8 @@ export default function ReviewsPage() {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [image, setImage] = useState<string | null>(null);
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [notice, setNotice] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -163,22 +165,53 @@ export default function ReviewsPage() {
   const overallPositive = overallScoredReviews.filter((review) => review.type === "Positive").length;
   const overallScore = overallScoredReviews.length ? (overallPositive / overallScoredReviews.length) * 100 : null;
 
-  function submitReview(event: React.FormEvent<HTMLFormElement>) {
+  async function submitReview(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (isSubmitting) return;
     if (!name.trim() || !title.trim() || !body.trim()) {
       setNotice("Please fill in your name, feedback headline and details.");
       return;
     }
-    const next: Review = {
-      id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
-      profile, name: name.trim(), type, title: title.trim(), body: body.trim(),
-      ...(image ? { image } : {}),
-      date: new Date().toISOString(),
-    };
-    const updated = [next, ...reviews];
-    setReviews(updated);
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(updated)); } catch { /* The current session still works if storage is unavailable. */ }
-    setName(""); setTitle(""); setBody(""); setImage(null); setNotice("Your review has been added on this browser."); setFilter("All"); setShowForm(false);
+
+    setIsSubmitting(true);
+    setNotice("");
+    try {
+      let uploadedImageUrl: string | undefined;
+      if (imageFile) {
+        const formData = new FormData();
+        formData.append("file", imageFile);
+        const response = await fetch("/api/uploads/images", {
+          method: "POST",
+          body: formData,
+          credentials: "same-origin",
+        });
+        const result = await response.json().catch(() => ({})) as { imageUrl?: string; error?: string };
+        if (!response.ok || !result.imageUrl) {
+          if (response.status === 401) {
+            throw new Error("Your sign-in session has expired. Please sign in again and retry.");
+          }
+          throw new Error(result.error || "Image upload failed. Please try again.");
+        }
+        uploadedImageUrl = result.imageUrl;
+      }
+
+      const next: Review = {
+        id: typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`,
+        profile, name: name.trim(), type, title: title.trim(), body: body.trim(),
+        ...(uploadedImageUrl ? { image: uploadedImageUrl } : {}),
+        date: new Date().toISOString(),
+      };
+      const updated = [next, ...reviews];
+      setReviews(updated);
+      try { localStorage.setItem(STORAGE_KEY, JSON.stringify(updated)); } catch { /* The current session still works if storage is unavailable. */ }
+      setName(""); setTitle(""); setBody(""); setImage(null); setImageFile(null);
+      setNotice("Your review has been added in this browser. Its image is stored in S3.");
+      setFilter("All"); setShowForm(false);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not publish feedback. Please try again.");
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   function voteReview(id: string, direction: "up" | "down") {
@@ -272,19 +305,20 @@ export default function ReviewsPage() {
               <label style={label} htmlFor="review-image">Attach an image (optional)</label>
               <input id="review-image" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(e) => {
                 const file = e.target.files?.[0];
-                if (!file) { setImage(null); return; }
-                if (file.size > 2 * 1024 * 1024) { setNotice("Please choose an image smaller than 2 MB."); e.target.value = ""; setImage(null); return; }
+                if (!file) { setImage(null); setImageFile(null); return; }
+                if (file.size > 2 * 1024 * 1024) { setNotice("Please choose an image smaller than 2 MB."); e.target.value = ""; setImage(null); setImageFile(null); return; }
+                setImageFile(file);
                 const reader = new FileReader();
                 reader.onload = () => { if (typeof reader.result === "string") { setImage(reader.result); setNotice(""); } };
-                reader.onerror = () => setNotice("Could not read this image. Please try another file.");
+                reader.onerror = () => { setNotice("Could not preview this image. Please try another file."); setImage(null); setImageFile(null); };
                 reader.readAsDataURL(file);
               }} style={{ ...input, padding: 9 }} />
-              <p style={{ margin: "6px 0 0", fontSize: 11, color: "#64748b" }}>JPG, PNG, WEBP or GIF · maximum 2 MB. Images are saved with this browser&apos;s review data for this prototype.</p>
-              {image && <div style={{ marginTop: 10 }}><img src={image} alt="Review attachment preview" style={{ display: "block", maxWidth: "100%", maxHeight: 260, borderRadius: 12, border: "1px solid #e2e8f0", objectFit: "contain" }} /><button type="button" onClick={() => setImage(null)} style={{ marginTop: 7, border: "1px solid #cbd5e1", borderRadius: 8, background: "white", padding: "6px 10px", cursor: "pointer", fontSize: 12 }}>Remove image</button></div>}
+              <p style={{ margin: "6px 0 0", fontSize: 11, color: "#64748b" }}>JPG, PNG, WEBP or GIF · maximum 2 MB. Images are uploaded to S3 when you publish feedback.</p>
+              {image && <div style={{ marginTop: 10 }}><img src={image} alt="Review attachment preview" style={{ display: "block", maxWidth: "100%", maxHeight: 260, borderRadius: 12, border: "1px solid #e2e8f0", objectFit: "contain" }} /><button type="button" onClick={() => { setImage(null); setImageFile(null); const fileInput = document.getElementById("review-image") as HTMLInputElement | null; if (fileInput) fileInput.value = ""; }} style={{ marginTop: 7, border: "1px solid #cbd5e1", borderRadius: 8, background: "white", padding: "6px 10px", cursor: "pointer", fontSize: 12 }}>Remove image</button></div>}
             </div>
             <p style={{ fontSize: 11, color: "#64748b", lineHeight: 1.6 }}>Do not post private information, threats, or unverified allegations as established facts. Clearly identify claims as allegations and include public sources where possible.</p>
             {notice && <p role="status" style={{ color: "#1d4ed8", fontSize: 13, fontWeight: 700 }}>{notice}</p>}
-            <button type="submit" style={{ border: 0, borderRadius: 10, background: "#1d4ed8", color: "white", padding: "12px 18px", fontWeight: 600, cursor: "pointer" }}>Publish feedback</button>
+            <button type="submit" disabled={isSubmitting} style={{ border: 0, borderRadius: 10, background: isSubmitting ? "#93c5fd" : "#1d4ed8", color: "white", padding: "12px 18px", fontWeight: 600, cursor: isSubmitting ? "wait" : "pointer" }}>{isSubmitting ? "Uploading and publishing…" : "Publish feedback"}</button>
           </form>
         </section>}
 
